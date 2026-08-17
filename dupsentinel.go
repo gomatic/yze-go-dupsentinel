@@ -16,6 +16,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 
 	goyze "github.com/gomatic/go-yze"
 	"golang.org/x/tools/go/analysis"
@@ -85,7 +86,8 @@ func run(pass *analysis.Pass) (any, error) {
 // reportDuplicates reports each name in one const spec that repeats an imported
 // sentinel's text.
 func reportDuplicates(pass *analysis.Pass, imported map[string]string, spec *ast.ValueSpec) {
-	for at, name := range spec.Names {
+	for index, name := range spec.Names {
+		at := nameIndex(index)
 		declared, isSentinel := sentinelValue(pass.TypesInfo.ObjectOf(name))
 		already, isDuplicate := imported[declared]
 		switch {
@@ -100,6 +102,10 @@ func reportDuplicates(pass *analysis.Pass, imported map[string]string, spec *ast
 	}
 }
 
+// nameIndex is a name's position within one const spec, which is also the
+// position of the value that name is declared with.
+type nameIndex int
+
 // isAlias reports a declaration whose value NAMES another package's constant
 // rather than restating its text.
 //
@@ -107,8 +113,8 @@ func reportDuplicates(pass *analysis.Pass, imported map[string]string, spec *ast
 // block is either an alias already reported at its own line or an iota form that
 // carries no message at all; either way there is no fresh literal here to be a
 // duplicate of anything.
-func isAlias(pass *analysis.Pass, spec *ast.ValueSpec, at int) bool {
-	if at >= len(spec.Values) {
+func isAlias(pass *analysis.Pass, spec *ast.ValueSpec, at nameIndex) bool {
+	if int(at) >= len(spec.Values) {
 		return true
 	}
 	named, isName := pass.TypesInfo.Uses[rootIdent(spec.Values[at])]
@@ -136,17 +142,31 @@ func rootIdent(value ast.Expr) *ast.Ident {
 func importedSentinels(pkg *types.Package) map[string]string {
 	found := map[string]string{}
 	for _, imported := range pkg.Imports() {
-		scope := imported.Scope()
-		for _, name := range scope.Names() {
-			object := scope.Lookup(name)
-			if !object.Exported() {
-				continue
-			}
-			if value, isSentinel := sentinelValue(object); isSentinel {
-				found[value] = imported.Name() + "." + name
-			}
+		maps.Copy(found, sentinelsPublishedBy(imported))
+	}
+
+	return found
+}
+
+// sentinelsPublishedBy is every exported sentinel one package publishes, keyed
+// by the text that decides what errors.Is matches and valued by the qualified
+// name an author would alias instead of redeclaring.
+//
+// Split from [importedSentinels] so each reads as one decision: which packages
+// are in reach, and what one package offers.
+func sentinelsPublishedBy(imported *types.Package) map[string]string {
+	found := map[string]string{}
+	scope := imported.Scope()
+	for _, name := range scope.Names() {
+		object := scope.Lookup(name)
+		if !object.Exported() {
+			continue
+		}
+		if value, isSentinel := sentinelValue(object); isSentinel {
+			found[value] = imported.Name() + "." + name
 		}
 	}
+
 	return found
 }
 
